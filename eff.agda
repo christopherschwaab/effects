@@ -199,6 +199,9 @@ _[_↦_] : Env → Var → V → Env
 ... | yes x≡y = v
 ... | no  x≢y = η y
 
+emptyState : Tree V × ℕ
+emptyState = Map.empty V , 0
+
 mutual
   ⟦_⟧c_ : Computation → Env → State (Tree V × ℕ) R
   ⟦ val e ⟧c η = return ∘ ιv =<< ⟦ e ⟧ η
@@ -304,3 +307,8 @@ mutual
           h (just (inj₂ ((n , r) , op , v , κ))) (just es)
             | no n,op∉es = return (ιoper ((n , r) , op , v , λ v' → flip h (just es) ∘ ρres =<< κ v'))
           h nothing es = return nothing
+
+--  eval : Res → V
+--  eval (just (inj₁ v)) = v
+--  eval (just (inj₂ ((n , r), op , v , κ))) = {!!}
+--  eval nothing = nothing
