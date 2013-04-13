@@ -1,16 +1,19 @@
 -- An implementation of eff described in:
 --  Programming with Algebraic Effects and Handlers
 {-# OPTIONS --no-positivity-check --no-termination-check #-}
-module eff where
 import Level
+import Relation.Binary
+module eff (OpSetoid : Relation.Binary.DecSetoid Level.zero Level.zero) where
+
 open import Function using (_∘_; _$_; flip)
 open import Data.Bool hiding (if_then_else_)
 open import Data.Empty
 open import Data.List using (List; []; _∷_)
-open import Data.Maybe
+open import Data.Maybe using (just)
 open import Data.Nat using (ℕ; zero; suc) renaming (_≟_ to _≟ℕ_)
 open import Data.Nat.Properties using (strictTotalOrder)
 open import Data.Product
+open import Data.String using (String; _++_)
 open import Data.Sum
 open import Data.Unit
 open import Relation.Binary.Core using (Decidable; _≡_; refl)
@@ -22,10 +25,14 @@ _≟v_ : Decidable {A = Var} _≡_
 x ≟v y = x ≟ℕ y
 
 data Const : Set where
-data Op : Set where
-  Choice : Op
-_≟op_ : Decidable {A = Op} _≡_
-Choice ≟op Choice = yes refl
+Op = Relation.Binary.DecSetoid.Carrier OpSetoid
+_≈_ = Relation.Binary.DecSetoid._≈_ OpSetoid
+_≟op_ = Relation.Binary.IsDecEquivalence._≟_ isDecEquivalence
+  where isDecEquivalence = Relation.Binary.DecSetoid.isDecEquivalence OpSetoid
+--data Op : Set where
+--  Choice : Op
+--_≟op_ : Decidable {A = Op} _≡_
+--Choice ≟op Choice = yes refl
 
 mutual
   OpSig = List (Op × Type × Type)
@@ -152,7 +159,6 @@ mutual
   data R : Set where
     ιv : V → R
     ιoper : EffectI × Op × V × (V → State (Tree V × ℕ) R) → R
-    nothing : R
   data V : Set where
     ιc : Const → V
     ιeff : EffectI → V
@@ -164,34 +170,36 @@ mutual
     ι→ : (V → State (Tree V × ℕ) R) → V
     ι⇒ : (R → State (Tree V × ℕ) R) → V
     ιv : V ⊎ ℕ × Op × V × (V → R) → V
-    nothing : V
 
 open Category.Monad.RawMonad (StateMonad (Tree V × ℕ))
 
-Res = Maybe (V ⊎ EffectI × Op × V × (V → State (Tree V × ℕ) R))
+data MaybeBlame (A : Set) : Set where
+  just : A → MaybeBlame A
+postulate
+  blame : {A B : Set} → String → A → MaybeBlame B
+  blameR : {A : Set} → String → A → R
+  blameV : {A : Set} → String → A → V
+Res = MaybeBlame (V ⊎ EffectI × Op × V × (V → State (Tree V × ℕ) R))
 ιres : Res → R
 ιres (just (inj₁ v)) = ιv v
 ιres (just (inj₂ oper)) = ιoper oper
-ιres nothing = nothing
 
 ρres : R → Res
 ρres (ιv v) = just (inj₁ v)
 ρres (ιoper op) = just (inj₂ op)
-ρres nothing = nothing
 
 ρval : Res → V
 ρval (just (inj₁ v)) = v
-ρval _               = nothing
+ρval (just (inj₂ v)) = blameV "ρval" v
 
-ρeff : V → Maybe EffectI
+ρeff : V → MaybeBlame EffectI
 ρeff (ιeff e) = just e
-ρeff _        = nothing
+ρeff e = blame "ρeff" e
 
 _† : (V → State (Tree V × ℕ) R) → Res → State (Tree V × ℕ) R
 (f †) (just (inj₁ v)) = f v
 (f †) (just (inj₂ (n , op , v , k))) =
   return (ιoper (n , op , v , λ v' → f † ∘ ρres =<< k v'))
-(f †) nothing = return nothing
 
 Env = Var → V
 _[_↦_] : Env → Var → V → Env
@@ -213,31 +221,31 @@ mutual
     where elim-bool : V → State (Tree V × ℕ) R
           elim-bool (ιb true)  = ⟦ c₁ ⟧c η
           elim-bool (ιb false) = ⟦ c₂ ⟧c η
-          elim-bool _ = return nothing
-  ⟦ match e with⊥ ⟧c η = return nothing
+          elim-bool v = return (blameR "elim-bool" v) 
+  ⟦ match e with⊥ ⟧c η = return (blameR "match⊥" e)
   ⟦ match e left x ↦ c₁ right y ↦ c₂ ⟧c η = elim+ =<< ⟦ e ⟧ η
     where elim+ : V → State (Tree V × ℕ) R
           elim+ (ι+ (inj₁ l)) = ⟦ c₁ ⟧c (η [ x ↦ l ])
           elim+ (ι+ (inj₂ r)) = ⟦ c₂ ⟧c (η [ y ↦ r ])
-          elim+ _ = return nothing
+          elim+ v = return (blameR "elim+" v)
   ⟦ match e withc x , y ↦ c ⟧c η = elim× =<< ⟦ e ⟧ η
     where elim× : V → State (Tree V × ℕ) R
           elim× (ι× (v₀ , v₁)) = ⟦ c ⟧c (η [ x ↦ v₀ ] [ y ↦ v₁ ])
-          elim× _ = return nothing
+          elim× v = return (blameR "elim×" v)
   ⟦ e₁ * e₂ ⟧c η = elim→ =<< ⟦ e₁ ⟧ η
     where elim→ : V → State (Tree V × ℕ) R
           elim→ (ι→ f) = f =<< ⟦ e₂ ⟧ η
-          elim→ _ = return nothing
+          elim→ v = return (blameR "elim→" v)
   ⟦ new E ⟧c η = fresh-n
     where fresh-n : Tree V × ℕ → R × Tree V × ℕ
           fresh-n (σ , n) = let s = σ , suc n
-                            in ιv (ιeff (n , λ _ _ → nothing , s)) , s
+                            in ιv (ιeff (n , λ _ _ → ι⋆ tt , s)) , s
   ⟦ withe e handle c end ⟧c η = elim⇒ =<< ⟦ e ⟧ η
     where elim⇒ : V → State (Tree V × ℕ) R
           elim⇒ (ι⇒ f) = f =<< ⟦ c ⟧c η
-          elim⇒ _ = return nothing
+          elim⇒ v = return (blameR "eilm⇒" v)
   ⟦ new E at e withc ops end ⟧c η = new-eff =<< ⟦ e ⟧ η
-    where handles? : (op : Op) → UDecidable (_≡_ op ∘ opMapped)
+    where handles? : (op : Op) → UDecidable (_≈_ op ∘ opMapped)
           handles? op (operation op' var _ at _ ↦ _) = op ≟op op'
           r : List OperationMap → Op × V → Tree V × ℕ → V × Tree V × ℕ
           r ops (op , v) (σ , n) with lookup V n σ | any (handles? op) ops
@@ -245,7 +253,7 @@ mutual
             where go : OperationMap → State (Tree V × ℕ) V
                   go (operation _ var x at y ↦ c₁) =
                     return ∘ ρval ∘ ρres =<< ⟦ c₁ ⟧c (η [ x ↦ v ] [ y ↦ s ])
-          ... | _ | _ = nothing , σ , n
+          ... | _ | _ = blameV "handles?.r: op ∉ ops" op , σ , n
           new-eff : V → Tree V × ℕ → R × Tree V × ℕ
           new-eff v (σ , n) = let σ' = insert V n v σ
                               in ιv (ιeff (n , r ops)) , σ' , n
@@ -266,17 +274,17 @@ mutual
     where inj-oper : V → State (Tree V × ℕ) V
           inj-oper (ιeff i) =
             return $ ι→ (λ v → return $ ιoper (i , op , v , return ∘ ιv))
-          inj-oper _ = return nothing
+          inj-oper v = return (blameV "inj-op" v)
   ⟦ handler hs val xv ↦ cv finally x ↦ cf ⟧ η =
     return $ ι⇒ (λ r → (λ v → ⟦ cf ⟧c (η [ x ↦ v ])) † ∘ ρres
                                 =<< h (ρres r) =<< toEffects hs)
-    where maybeCons : {A B : Set} → Maybe A × B → Maybe (List (A × B))
-                    → Maybe (List (A × B))
+    where maybeCons : {A B : Set} → MaybeBlame A × B → MaybeBlame (List (A × B))
+                    → MaybeBlame (List (A × B))
           maybeCons (just x , y) (just xs) = just ((x , y) ∷ xs)
-          maybeCons _ _ = nothing
           toEffects : List OperationHandler
                     → State (Tree V × ℕ)
-                        (Maybe (List (EffectI × Op × Var × Var × Computation)))
+                        (MaybeBlame
+                          (List (EffectI × Op × Var × Var × Computation)))
           toEffects (e # op var x var k ↦ c ∷ hs) =
             ⟦ e ⟧ η >>= λ v → toEffects hs >>= λ vs →
             return (maybeCons (ρeff v , op , x , k , c) vs)
@@ -288,27 +296,20 @@ mutual
           proj-op : EffectI × Op × Var × Var × Computation → Op
           proj-op ((_ , _) , op , _ , _) = op
           ≟× : (n : EffectIndex) → (op : Op)
-             → UDecidable (λ e → n ≡ proj-effect-index e × op ≡ proj-op e)
+             → UDecidable (λ e → n ≡ proj-effect-index e × op ≈ proj-op e)
           ≟× n op ((n' , _) , op' , _ , _ , _) with n ≟ℕ n' | op ≟op op'
-          ≟× n op ((.n , _) , .op , _ , _ , _) | yes refl | yes refl =
-            yes (refl , refl)
+          ≟× n op ((.n , _) , op' , _ , _ , _) | yes refl | yes op≈op' =
+            yes (refl , op≈op')
           ≟× n op ((_ , _) , _ , _ , _ , _) | no n≢n' | _  = no (n≢n' ∘ proj₁)
           ≟× n op ((_ , _) , _ , _ , _ , _) | _ | no op≢op' = no (op≢op' ∘ proj₂)
-          h : Res → Maybe (List (EffectI × Op × Var × Var × Computation))
+          h : Res → MaybeBlame (List (EffectI × Op × Var × Var × Computation))
             → State (Tree V × ℕ) R
           h (just (inj₁ v)) es = ⟦ cv ⟧c (η [ x ↦ v ])
-          h (just (inj₂ (n , op , v , κ))) nothing = return nothing
           h (just (inj₂ ((n , _) , op , v , κ))) (just es) with any (≟× n op) es
           h (just (inj₂ ((n , _) , op , v , κ))) (just es)
             | yes n,op∈es with find n,op∈es
-          h (just (inj₂ ((n , _) , op , v , κ))) (just es)
+          h (just (inj₂ ((n , r) , op , v , κ))) (just es)
             | yes n,op∈es | (n' , op' , x , k , c) , _ , _ , _ =
-              ⟦ c ⟧c ((η [ x ↦ v ]) [ k ↦ ι→ κ ])
+              r (op , v) >>= (λ _ → ⟦ c ⟧c ((η [ x ↦ v ]) [ k ↦ ι→ (λ v' → flip h (just es) ∘ ρres =<< κ v') ]))
           h (just (inj₂ ((n , r) , op , v , κ))) (just es)
             | no n,op∉es = return (ιoper ((n , r) , op , v , λ v' → flip h (just es) ∘ ρres =<< κ v'))
-          h nothing es = return nothing
-
---  eval : Res → V
---  eval (just (inj₁ v)) = v
---  eval (just (inj₂ ((n , r), op , v , κ))) = {!!}
---  eval nothing = nothing
