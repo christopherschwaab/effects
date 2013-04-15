@@ -16,7 +16,6 @@ type Var = String
 infixr 3 `Cons`
 data Expr = Var Var
           | Num Int
-          | C Computation
           | Tru | Fls
           | Nil | Cons Expr Expr
           | TT
@@ -41,10 +40,9 @@ data Computation = Val Expr
                  | HandleWith Expr Computation
                  deriving Show
 
-type ResourceMap = M.Map Int V
-type EvalS = State (Int, ResourceMap)
+type EvalS = State Int
 
-type EffectI = (Int, (Op, V, V) -> EvalS (V, V))
+type EffectI = Int
 data V = Z (Maybe Int)
        | B (Maybe Bool)
        | U (Maybe ())
@@ -62,7 +60,7 @@ instance Show V where
   show (Z n) = "(Z " ++ show n ++ ")"
   show (B b) = "(B " ++ show b ++ ")"
   show (U u) = "(U " ++ show u ++ ")"
-  show (I (Just (i, r))) = "(I (Just (" ++ show i ++ ", r)))"
+  show (I (Just i)) = "(I (Just (" ++ show i ++ "))"
   show (I Nothing) = "(I Nothing)"
   show (L vs) = "(L " ++ show vs ++ ")"
   show (Prod v1 v2) = "(Prod " ++ show v1 ++ " " ++ show v2 ++ ")"
@@ -72,8 +70,8 @@ instance Show V where
   show (FunR f) = "FunR"
 instance Show Rt where
   show (Value v) = "(Value " ++ show v ++ ")"
-  show (Oper (n, r) op v f) =
-    "(Oper (" ++ show n ++ ", r) " ++ show op ++ " " ++ show v ++ " FunV" ++ ")"
+  show (Oper n op v f) =
+    "(Oper (" ++ show n ++ " " ++ show op ++ " " ++ show v ++ " FunV" ++ ")"
 
 liftV :: (V -> EvalS R) -> R -> EvalS R
 liftV f (Just (Value v)) = f v
@@ -86,10 +84,6 @@ extend :: Env -> Var -> V -> Env
 extend env x v = \y -> if x == y then v else env y
 
 evalv :: Expr -> Env -> EvalS V
-evalv (C c) env = evalc c env >>= \v ->
-  case v of
-    Just (Value v) -> pure v
-    _ -> pure $ L []
 evalv (Del f es) env =
   case lookup f dels of
     Just f' -> f' <$> mapM (flip evalv env) es
@@ -134,16 +128,12 @@ evalv (Handler hs xv cv xf cf) env = do
 
         h :: [(EffectI, Op, Var, Var, Computation)] -> R -> EvalS R
         h hs' (Just (Value v)) = evalc cv (extend env xv v)
-        h hs' (Just (Oper (n, r) op v kappa)) =
-          case find (\((ni, ri), opi, x, k, c) -> n == ni && op == opi) hs' of
-             Just ((ni, ri), opi, x, k, c) -> do
-                 (nextFresh, ss) <- get
-                 case M.lookup ni ss of
-                   Just s -> do (v', s') <- r (opi, v, s)
-                                put (nextFresh, M.insert ni s' ss)
-                                evalc c (extend (extend env x v') k (FunV (\u -> h hs' =<< kappa u)))
-                   _ -> evalc c (extend (extend env x v) k (FunV (\u -> h hs' =<< kappa u)))
-             Nothing -> pure . Just $ Oper (n, r) op v (\v -> h hs' =<< kappa v)
+        h hs' (Just (Oper n op v kappa)) =
+          case find (\(ni, opi, x, k, c) -> n == ni && op == opi) hs' of
+             Just (ni, opi, x, k, c) ->
+               evalc c (extend (extend env x v)
+                               k (FunV (\u -> h hs' =<< kappa u)))
+             Nothing -> pure . Just $ Oper n op v (\v -> h hs' =<< kappa v)
 
 evalc :: Computation -> Env -> EvalS R
 evalc (Val v) env = Just . Value <$> evalv v env
@@ -173,9 +163,9 @@ evalc (e1 :$ e2) env = do
     FunV f -> f v2
     _ -> pure Nothing
 evalc (New eff) env = fresh >>= \n ->
-  return . Just . Value . I $ Just (n, undefined)
-  where fresh = do (n, ss) <- get
-                   put (n+1, ss)
+  return . Just . Value . I $ Just n
+  where fresh = do n <- get
+                   put (n+1)
                    return n
 evalc (HandleWith e c) env = do
   v <- evalv e env
@@ -183,7 +173,7 @@ evalc (HandleWith e c) env = do
     FunR f -> f =<< evalc c env
     _ -> pure Nothing
 
-eval c = fst $ runState (evalc c undefined) (0, M.empty)
+eval c = fst $ runState (evalc c undefined) 0
 
 chooser c = Handler [(c, Decide, "x", "k", Var "k" :$ Tru)]
                     "x" (Val (Var "x"))
