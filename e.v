@@ -1,4 +1,4 @@
-Require Import Equality List.
+Require Import Equality List FunctionalExtensionality.
 Set Implicit Arguments.
 Open Scope list_scope.
 
@@ -37,6 +37,16 @@ Inductive eff : Type -> optags -> Type :=
                 (k : R -> eff A es), eff A es
 | Val : forall A es, A -> eff A es.
 
+Fixpoint is_fresh (nm : label) (es : optags) :=
+  match es with
+  | (nm', _) :: es' =>
+    match label_dec nm nm' with
+    | left _ => False
+    | right _ => is_fresh nm es'
+    end
+  | nil => True
+  end.
+
 Lemma tag_eq_dec : forall (t1 t2 : tag), {t1 = t2} + {t1 <> t2}.
 Proof. decide equality. Defined.
 
@@ -54,6 +64,9 @@ Lemma optag_eq_dec : forall (o1 o2 : optag), {o1 = o2} + {o1 <> o2}.
       right. intro. refine (n _). congruence.
 Qed.
 
+Lemma in_head : forall {A}{x : A}{xs}, In x (x :: xs).
+Proof. intros. simpl. left. reflexivity. Qed.
+
 Lemma in_remove_other :
   forall A (eq_dec : forall a1 a2 : A, {a1 = a2} + {a1 <> a2}) x1 x2 xs,
     In x1 xs -> x1 <> x2 -> In x1 (remove eq_dec x2 xs).
@@ -67,11 +80,103 @@ Lemma in_remove_other :
       apply (IHxs H).
       apply (in_cons a x1 _ (IHxs H)).
 Qed.
+  
+Lemma remove_sym : forall A (eq_dec : forall (a b : A), {a = b} + {a <> b}) (x1 x2 : A) xs,
+  remove eq_dec x1 (remove eq_dec x2 xs) =
+  remove eq_dec x2 (remove eq_dec x1 xs).
+  intros A eq_dec x1 x2 xs.
+  induction xs.
+    simpl. reflexivity.
+    simpl.
+    destruct (eq_dec x1 a).
+      destruct (eq_dec x2 a).
+        apply IHxs.
+        rewrite (eq_sym IHxs).
+        simpl.
+        destruct (eq_dec x1 a).
+          reflexivity.
+          tauto.
+        simpl.
+        destruct (eq_dec x2 a).
+          apply IHxs.
+          rewrite (eq_sym IHxs).
+          simpl.
+          destruct (eq_dec x1 a).
+            tauto.
+            reflexivity.
+Qed.
+
+Lemma remove_head :
+  forall A (eq_dec : forall a1 a2 : A, {a1 = a2} + {a1 <> a2}) x xs,
+    remove eq_dec x (x :: xs) = remove eq_dec x xs.
+  intros A eq_dec x xs.
+  induction xs; simpl; destruct (eq_dec x x).
+    reflexivity. tauto.
+    reflexivity. tauto.
+Qed.
+
+Lemma remove_fresh {A : Type}{es : optags}{nm : label}{e : efftag}
+  : is_fresh nm es -> remove optag_eq_dec (nm, e) es = es.
+  intros.
+  induction es; simpl.
+    reflexivity.
+    destruct a.
+    destruct (optag_eq_dec (nm, e) (l, e0)); simpl in H;
+      destruct (label_dec nm l).
+        tauto.
+        exfalso. refine (n _). congruence.
+        tauto.
+        rewrite (IHes H).
+        reflexivity.
+Qed.
+
+Definition removeFreshEff {A : Type}{es : optags}{nm : label}{e : efftag}
+  (H : is_fresh nm es) (p : eff A es) : eff A (remove optag_eq_dec (nm, e) es).
+  rewrite (remove_fresh (A:=A) H).
+  exact p.
+Defined.
+
+Definition removeSymEff {A : Type}{es : optags}{opt opt' : optag}
+  : eff A (remove optag_eq_dec opt (remove optag_eq_dec opt' es)) ->
+    eff A (remove optag_eq_dec opt' (remove optag_eq_dec opt es)).
+  rewrite (remove_sym optag_eq_dec opt opt' _).
+  intro p.
+  exact p.
+Defined.
+
+Definition removeOtherEff {A : Type}{es : optags}{e e' : optag}
+  : e <> e' ->
+    eff A (remove optag_eq_dec e' (e :: es)) ->
+    eff A (e :: remove optag_eq_dec e' es).
+  intros neq.
+  simpl.
+  destruct (optag_eq_dec e' e).
+    exfalso. apply (neq (eq_sym e0)).
+    intro p. exact p.
+Defined.
+
+Axiom JMeq_functional_extensionality_dep : forall {A} {B B' : A -> Type},
+  forall (f : forall x : A, B x) (g : forall x : A, B' x),
+    (forall x, f x ~= g x) -> f ~= g.
+Lemma JMeq_functional_extensionality {A B B'} (f : A -> B) (g : A -> B') :
+  (forall x, f x ~= g x) -> f ~= g.
+Proof. intro eq. apply (JMeq_functional_extensionality_dep f g eq). Qed.
+(* this is actually not true *)
+Lemma newFresh : forall {A : Type}{es : optags}{nm : label}{e : efftag},
+  forall (fresh : is_fresh nm es) (p : eff A es),
+    {p' : (eff A ((nm, e) :: es)) | p' ~= p}.
+  intros A es nm e fresh p.
+  induction p.
+    exists (Call e0 (in_cons (nm, e) e0 es ef) op (fun r => proj1_sig (X r fresh))).
+      assert ((fun r => proj1_sig (X r fresh)) ~= k).
+        apply (JMeq_functional_extensionality (fun r => proj1_sig (X r fresh)) k
+                                              (fun r => proj2_sig (X r fresh))).
+Admitted.
 
 Lemma neq_sym : forall A (a b : A), a <> b -> b <> a.
 Proof. intros A a b neq. intro. apply (neq (eq_sym H)). Qed.
 
-Fixpoint runReader_impl {ty : tag}{nm : label}{es : optags}{A : Type}
+Fixpoint runReader {ty : tag}{nm : label}{es : optags}{A : Type}
   (rdr : In (nm, ReaderTag ty) es)
   (AEq : denoteTag ty = A)
   (prog : eff A es)
@@ -82,16 +187,16 @@ Fixpoint runReader_impl {ty : tag}{nm : label}{es : optags}{A : Type}
       destruct e0.
       destruct op.
 
-      apply (runReader_impl ty nm es A rdr AEq (k ctx) ctx).
+      apply (runReader ty nm es A rdr AEq (k ctx) ctx).
       
       refine (@Call A e (remove optag_eq_dec (nm, ReaderTag ty) es) R _ op
-                    (fun x => runReader_impl ty nm es A rdr AEq (k x) ctx)).
+                    (fun x => runReader ty nm es A rdr AEq (k x) ctx)).
         apply (in_remove_other optag_eq_dec es ef (neq_sym n)).
       
     apply (Val _ a).
 Defined.
 
-Fixpoint runState_impl {ty : tag}{nm : label}{es : optags}{A S : Type}
+Fixpoint runState {ty : tag}{nm : label}{es : optags}{A S : Type}
   (st : In (nm, StateTag ty) es)
   (SEq : denoteTag ty = S)
   (prog : eff A es)
@@ -101,13 +206,11 @@ Fixpoint runState_impl {ty : tag}{nm : label}{es : optags}{A S : Type}
     destruct (optag_eq_dec (nm, StateTag ty) e).
       destruct e0.
       destruct op.
-
-      apply (runState_impl ty nm es A S st SEq (k tt) d).
-
-      apply (runState_impl ty nm es A S st SEq (k s) s).
+        apply (runState ty nm es A S st SEq (k tt) d).
+        apply (runState ty nm es A S st SEq (k s) s).
       
       refine (@Call _ _ (remove optag_eq_dec (nm, StateTag ty) es) R _ op
-                    (fun x => runState_impl ty nm es A S st SEq (k x) s)).
+                    (fun x => runState ty nm es A S st SEq (k x) s)).
         apply (in_remove_other optag_eq_dec es ef (neq_sym n)).
       
     rewrite SEq in s.
@@ -212,7 +315,7 @@ Definition runEmpty (A : Type) (p : eff A nil) : A.
   assumption.
 Defined.
   
-Fixpoint local_impl {ty : tag}{nm : label}{es : optags}{A : Type}
+Fixpoint local {ty : tag}{nm : label}{es : optags}{A : Type}
   (rdr : In (nm, ReaderTag ty) es)
   (f : denoteTag ty -> denoteTag ty)
   (prog : eff A es)
@@ -223,10 +326,8 @@ Fixpoint local_impl {ty : tag}{nm : label}{es : optags}{A : Type}
       destruct e0.
       remember op.
       destruct op.
-      apply (Call (nm, ReaderTag ty) ef d(fun x => local_impl ty nm es A rdr f (k (f x)))).
-      
-      apply (Call e ef op (fun x => local_impl ty nm es A rdr f (k x))).
-
+        apply (Call (nm, ReaderTag ty) ef d(fun x => local ty nm es A rdr f (k (f x)))).
+      apply (Call e ef op (fun x => local ty nm es A rdr f (k x))).
     apply (Val _ a).
 Defined.
 
@@ -238,28 +339,96 @@ Fixpoint rep {A : Type}{es : optags} (n : nat) (m : eff A es) : eff unit es :=
 Definition tick {nm : label}{es : optags} (st : In (nm, StateTag NatTag) es) : eff unit es :=
   get st >>= fun m => put st (m+1).
 
-Fixpoint runCountReader {ty : tag}{rdrNm stNm : label}{es : optags}{A : Type}
+Definition addTicks {A : Type}{tickNm : label}{es : optags}
+  (nm : label) : is_fresh tickNm es -> eff A es -> eff A ((tickNm, StateTag NatTag) :: es).
+  intros fresh p.
+  induction p.
+    destruct e.
+    destruct (label_dec l nm).
+      refine (tick (nm:=tickNm) _ >>
+              Call _ (in_cons (tickNm, _) _ es ef) op (fun r => X r fresh)).
+        simpl. left. reflexivity.
+      apply (Call _ (in_cons (tickNm, _) _ es ef) op (fun r => X r fresh)).
+    apply (Val _ a).
+Defined.
+
+Definition runCountReader {ty : tag}{rdrNm tickNm : label}{es : optags}{A : Type}
+  (fresh : is_fresh tickNm es)
   (rdr : In (rdrNm, ReaderTag ty) es)
-  (st : In (stNm, StateTag NatTag) es)
   (AEq : denoteTag ty = A)
-  (prog : eff A es)
+  (p : eff A es)
   (ctx : denoteTag ty)
-  {struct prog} : eff A (remove optag_eq_dec (rdrNm, ReaderTag ty) es).
-  destruct prog.
+  : eff A ((tickNm, StateTag NatTag) :: remove optag_eq_dec (rdrNm, ReaderTag ty) es).
+  assert (p' : eff A (remove optag_eq_dec (rdrNm, ReaderTag ty) ((tickNm, StateTag NatTag) :: es))).
+    refine (runReader _ AEq (addTicks rdrNm fresh p) ctx).
+      simpl. right. assumption.
+  refine (removeOtherEff _ p').
+    discriminate.
+Defined.
+
+Lemma fresh_remove_other : forall {nm}{opt : optag}{es},
+  is_fresh nm es -> nm <> fst opt -> is_fresh nm (remove optag_eq_dec opt es).
+  intros nm opt es fresh neq.
+  induction es.
+    simpl. trivial.
+    simpl.
+    destruct (optag_eq_dec opt a); destruct a; unfold is_fresh in fresh.
+      destruct (label_dec nm l).
+        tauto.
+        apply (IHes fresh).
+      unfold is_fresh.
+      destruct (label_dec nm l).
+        tauto.
+        apply (IHes fresh).
+Qed.
+
+Lemma fresh_is_fresh : forall {nm}{opt : optag}{es},
+  is_fresh nm es -> In opt es -> nm <> fst opt.
+  intros nm opt es fresh ef nmEq.
+  induction es.
+    destruct ef.
+    destruct a.
+    unfold is_fresh in fresh.
+    destruct (label_dec nm l).
+      tauto.
+      unfold In in ef.
+      destruct ef.
+        rewrite (eq_sym H) in nmEq. apply (n nmEq).
+        apply (IHes fresh H).
+Qed.
+
+Definition unremoveHeadEff {A : Type}{es : optags}{e : optag}
+  : eff A (remove optag_eq_dec e es) -> eff A (remove optag_eq_dec e (e :: es)).
+  rewrite (eq_sym (remove_head _ e _)).
+  intro p. exact p.
+Defined.
+
+Lemma tick_non_interference :
+  forall mask ty rdrNm tickNm es A (fresh : is_fresh tickNm es)
+         (tickMasked : In (tickNm, StateTag NatTag) mask)
+         (rdr : In (rdrNm, ReaderTag ty) es)(AEq : denoteTag ty = A)
+         (p : eff A es)(ctx : denoteTag ty),
+    {((runState in_head (eq_refl (denoteTag NatTag))
+         (runCountReader fresh rdr AEq p ctx) 0) >>= fun x =>
+      eta (fst x)) ~~
+      unremoveHeadEff
+        (removeFreshEff (fresh_remove_other fresh (fresh_is_fresh fresh rdr))
+                        (runReader rdr AEq p ctx))} / {mask}.
+  intros mask ty rdrNm tickNm es A fresh tickMasked rdr AEq p ctx.
+  induction p.
+    (*unfold runState, runCountReader, runReader, eta, bind.*)
+    unfold runReader.
     destruct (optag_eq_dec (rdrNm, ReaderTag ty) e).
       destruct e0.
       destruct op.
-
-      refine (tick (in_remove_other optag_eq_dec es st _) >>
-              runCountReader ty rdrNm stNm es A rdr st AEq (k ctx) ctx).
-        discriminate.
-      
-      refine (@Call A e (remove optag_eq_dec (rdrNm, ReaderTag ty) es) R _ op
-                    (fun x => runCountReader ty rdrNm stNm es A rdr st AEq (k x) ctx)).
-        apply (in_remove_other optag_eq_dec es ef (neq_sym n)).
-      
-    apply (Val _ a).
-Defined.
+      fold (runReader(A:=A)(es:=es)(ty:=ty)(nm:=rdrNm)).
+      unfold runCountReader.
+      unfold addTicks.
+      unfold eff_rect.
+      destruct (label_dec rdrNm rdrNm).
+        unfold runReader, tick, bind.
+      unfold runState, runCountReader, eta, bind.
+Admitted.
 
 Definition note {ty : tag}{nm : label}{es : optags}
   (trace : In (nm, StateTag (ListTag ty)) es) (v : denoteTag ty) : eff unit es :=
@@ -305,18 +474,18 @@ Section Stuff.
       (forall x, {f1 x ~~ f2 x} / {mask}) ->
       {(p1 >>= f1) ~~ (p2 >>= f2)} / {mask}.
 
-  Lemma runReader_equiveff_impl {mask : optags}{ty : tag}{rdrNm : label}{es : optags}{A : Type}
+  Lemma runReader_equiveff {mask : optags}{ty : tag}{rdrNm : label}{es : optags}{A : Type}
     (rdr : In (rdrNm, ReaderTag ty) es)
     (AEq : denoteTag ty = A)
     : forall (p1 p2 : eff A es)(ctx : denoteTag ty),
         {p1 ~~ p2} / {mask} ->
-        {runReader_impl rdr AEq p1 ctx ~~ runReader_impl rdr AEq p2 ctx} / {mask}.
+        {runReader rdr AEq p1 ctx ~~ runReader rdr AEq p2 ctx} / {mask}.
     intros p1 p2 ctx p1Ep2.
     induction p1Ep2.
       rewrite H. apply (EqVal _ _ eq_refl).
       destruct (optag_eq_dec (rdrNm, ReaderTag ty) e).
         destruct e0.
-        unfold runReader_impl.
+        unfold runReader.
         destruct (optag_eq_dec (rdrNm, ReaderTag ty) (rdrNm, ReaderTag ty)).
           dependent destruction e.
           destruct op.
@@ -324,14 +493,14 @@ Section Stuff.
   
         apply EqCall. auto.
         
-        unfold runReader_impl.
+        unfold runReader.
           destruct (optag_eq_dec (rdrNm, ReaderTag ty) e).
           tauto.
           apply EqCall.
           auto.
 
       (* EqIgnore *)
-      unfold runReader_impl.
+      unfold runReader.
       destruct (optag_eq_dec (rdrNm, ReaderTag ty) e).
         destruct e0.
         destruct op.
@@ -346,7 +515,7 @@ Section Stuff.
       apply (EqTrans (IHp1Ep2_1 rdr AEq) (IHp1Ep2_2 rdr AEq)).
   
       (* AskAsk *)
-      unfold ask, bind, runReader_impl.
+      unfold ask, bind, runReader.
       destruct (optag_eq_dec (rdrNm, ReaderTag ty) (nm, ReaderTag ty0)).
         assert (tyEq : ty = ty0) by congruence. destruct tyEq.
         assert (nmEq : rdrNm = nm) by congruence. destruct nmEq.
@@ -368,19 +537,19 @@ Section Stuff.
         apply (GetPut _).
   Qed.
   
-  Lemma local_equiveff_impl {mask}{ty : tag}{rdrNm : label}{es : optags}{A : Type}
+  Lemma local_equiveff {mask}{ty : tag}{rdrNm : label}{es : optags}{A : Type}
     (rdr : In (rdrNm, ReaderTag ty) es)
     (f : denoteTag ty -> denoteTag ty)
     : forall (p1 p2 : eff A es),
         {p1 ~~ p2} / {mask} ->
-        {local_impl rdr f p1 ~~ local_impl rdr f p2} / {mask}.
+        {local rdr f p1 ~~ local rdr f p2} / {mask}.
     intros p1 p2 p1Ep2.
     induction p1Ep2.
       rewrite H. apply (EqVal _ _ eq_refl).
   
       destruct (optag_eq_dec (rdrNm, ReaderTag ty) e).
         destruct e0.
-        unfold local_impl.
+        unfold local.
         destruct (optag_eq_dec (rdrNm, ReaderTag ty) (rdrNm, ReaderTag ty)).
           dependent destruction e.
           destruct op.
@@ -389,14 +558,14 @@ Section Stuff.
   
         apply EqCall; auto.
         
-        unfold local_impl.
+        unfold local.
           destruct (optag_eq_dec (rdrNm, ReaderTag ty) e).
           tauto.
           apply EqCall.
           auto.
           
       (* EqIgnore *)
-      unfold local_impl.
+      unfold local.
       destruct (optag_eq_dec (rdrNm, ReaderTag ty) e).
         destruct e0.
         destruct op.
@@ -413,7 +582,7 @@ Section Stuff.
       apply (EqTrans (IHp1Ep2_1 rdr) (IHp1Ep2_2 rdr)).
           
       (* AskAsk *)
-      unfold ask, eta, bind, local_impl.
+      unfold ask, eta, bind, local.
       destruct (optag_eq_dec (rdrNm, ReaderTag ty) (nm, ReaderTag ty0)).
         assert (tyEq : ty = ty0) by congruence. destruct tyEq.
         assert (nmEq : rdrNm = nm) by congruence. destruct nmEq.
@@ -439,27 +608,27 @@ Section Stuff.
         apply (GetPut _).
   Qed.
 
-  Lemma runState_equiveff_impl {mask}{ty : tag}{stNm : label}{es : optags}{A S : Type}
+  Lemma runState_equiveff {mask}{ty : tag}{stNm : label}{es : optags}{A S : Type}
     (st : In (stNm, StateTag ty) es)
     (SEq : denoteTag ty = S)
     (stateUnmasked : ~ In (stNm, StateTag ty) mask)
     : forall (p1 p2 : eff A es) (s : denoteTag ty),
         {p1 ~~ p2} / {mask} ->
-        {runState_impl st SEq p1 s ~~ runState_impl st SEq p2 s} / {mask}.
+        {runState st SEq p1 s ~~ runState st SEq p2 s} / {mask}.
     intros p1 p2 s p1Ep2.
     refine (
       equiveff_ind
         (fun (A : Type) (es : optags) (p1 p2 : eff A es) =>
                   forall (st : In (stNm, StateTag ty) es) (SEq : denoteTag ty = S)
                          (s : denoteTag ty),
-                    {runState_impl st SEq p1 s ~~
-                     runState_impl st SEq p2 s} / {mask})
+                    {runState st SEq p1 s ~~
+                     runState st SEq p2 s} / {mask})
         _ _ _ _ _ _ _ _ _ _ _ p1Ep2 st SEq s).
     (* Val *)
     intros. rewrite H. apply equiveff_refl.
     (* Call *)
     intros.
-      unfold runState_impl.
+      unfold runState.
       destruct (optag_eq_dec (stNm, StateTag ty) e).
         destruct e0.
         destruct op.
@@ -469,7 +638,7 @@ Section Stuff.
         
     (* Ignore *)
     intros.
-    unfold runState_impl.
+    unfold runState.
     destruct (optag_eq_dec (stNm, StateTag ty) e).
       exfalso. rewrite (eq_sym e0) in eMasked. apply (stateUnmasked eMasked).
       apply EqIgnore. assumption. apply (fun x => H0 x st0 SEq0 s0).
@@ -491,7 +660,7 @@ Section Stuff.
     (* GetQuery *)
     intros.
     unfold get, bind.
-    unfold runState_impl at 2.
+    unfold runState at 2.
     destruct (optag_eq_dec (stNm, StateTag ty) (nm, StateTag ty0)).
       assert (nmEq : stNm = nm) by congruence. destruct nmEq.
       destruct (tag_eq_dec ty ty0).
@@ -501,7 +670,7 @@ Section Stuff.
 
     (* GetGet *)
     intros.
-    unfold get, bind, runState_impl.
+    unfold get, bind, runState.
     destruct (optag_eq_dec (stNm, StateTag ty) (nm, StateTag ty0)).
       assert (nmEq : stNm = nm) by congruence. destruct nmEq.
       assert (tyEq : ty = ty0) by congruence. destruct tyEq.
@@ -517,7 +686,7 @@ Section Stuff.
 
     (* PutPut *)
     intros.
-    unfold put, bind, runState_impl.
+    unfold put, bind, runState.
     destruct (optag_eq_dec (stNm, StateTag ty) (nm, StateTag ty0)).
       assert (nmEq : stNm = nm) by congruence. destruct nmEq.
       assert (tyEq : ty = ty0) by congruence. destruct tyEq.
@@ -533,8 +702,8 @@ Section Stuff.
 
     (* PutGet *)
     intros.
-    unfold runState_impl at 1.
-    unfold put, get, eta, bind, runState_impl at 1.
+    unfold runState at 1.
+    unfold put, get, eta, bind, runState at 1.
     destruct (optag_eq_dec (stNm, StateTag ty) (nm, StateTag ty0)).
       assert (nmEq : stNm = nm) by congruence. destruct nmEq.
       assert (tyEq : ty = ty0) by congruence. destruct tyEq.
@@ -550,7 +719,7 @@ Section Stuff.
 
     (* GetPut *)
     intros.
-    unfold put, get, bind, runState_impl, eta.
+    unfold put, get, bind, runState, eta.
     destruct (optag_eq_dec (stNm, StateTag ty) (nm, StateTag ty0)).
       assert (nmEq : stNm = nm) by congruence. destruct nmEq.
       assert (tyEq : ty = ty0) by congruence; destruct tyEq.
@@ -698,8 +867,7 @@ Section Stuff.
       simpl. destruct (optag_eq_dec (rdrNm, ReaderTag ty) (nm, StateTag ty0)). discriminate.
         apply (GetPut _).
   Qed.
-
-  (*
+  
   Lemma runTraceState_equiveff {mask}{ty : tag}{stNm traceNm : label}{es : optags}{A S : Type}
     (trace : In (traceNm, StateTag (ListTag ty)) es)
     (maskTrace : In (traceNm, StateTag (ListTag ty)) mask)
@@ -732,10 +900,22 @@ Section Stuff.
                    (equiveff_refl _ (note _ _))
                    (fun _ => H0 tt st0 trace0 SEq0 d)).
           apply (H0 s0 st0 trace0 SEq0 s0).
-        fold (runTraceState (ty:=ty)(stNm:=stNm)(traceNm:=traceNm)(A:=A0)(S:=S)(es:=es0)).
         apply EqCall. apply (fun x => H0 x st0 trace0 SEq0 s0).
+
+      (* Ignore *)
+      intros.
+      unfold runTraceState.
+      destruct (optag_eq_dec (stNm, StateTag ty) e).
+        destruct e0.
+        destruct op.
+          fold (runTraceState (ty:=ty)(stNm:=stNm)(traceNm:=traceNm)(A:=A0)(S:=S)(es:=es0)).
+          apply EqIgnore. assumption.
+          intro. apply EqIgnore. assumption.
+          intro.
+          fold (runTraceState (ty:=ty)(stNm:=stNm)(traceNm:=traceNm)(A:=A0)(S:=S)(es:=es0)).
+          apply (H0 tt st0 trace0 SEq0 s0).
+        fold (runTraceState (ty:=ty)(stNm:=stNm)(traceNm:=traceNm)(A:=A0)(S:=S)(es:=es0)).
   Qed.
-  *)
 End Stuff.
 
 End Effects.
@@ -751,7 +931,7 @@ Definition runEx (ex : eff (denoteTag NatTag) (("s", StateTag NatTag) :: nil))
   : eff (denoteTag NatTag * nat) nil.
   assert (In ("s", StateTag NatTag) (("s", StateTag NatTag) :: nil)).
     unfold In. auto.
-  refine (@runState_impl NatTag "s" _ (denoteTag NatTag) nat H _ ex 3).
+  refine (@runState NatTag "s" _ (denoteTag NatTag) nat H _ ex 3).
   unfold In; auto.
   auto.
 Defined.
@@ -772,7 +952,7 @@ Definition ex1 : eff nat (ReaderTag NatTag :: nil).
 Defined.
 Definition runRdrEx (ex : eff (denoteTag NatTag) (ReaderTag NatTag:: nil))
   : eff (denoteTag NatTag) nil.
-  refine (@runReader_impl NatTag (ReaderTag NatTag :: nil) (denoteTag NatTag)
+  refine (@runReader NatTag (ReaderTag NatTag :: nil) (denoteTag NatTag)
                           _ eq_refl ex 3).
   unfold In; auto.
 Defined.
@@ -782,7 +962,7 @@ Eval simpl in ((denoteTag NatTag * nat)%type).
 
 
 Definition ex2 : eff (denoteTag NatTag) (ReaderTag NatTag :: nil).
-  refine (local_impl _ (fun (n : denoteTag NatTag) => n + 3) ex1).
+  refine (local _ (fun (n : denoteTag NatTag) => n + 3) ex1).
   unfold In; auto.
 Defined.
 Eval compute in (runRdrEx ex2).
